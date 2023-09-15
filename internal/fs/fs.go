@@ -54,6 +54,9 @@ type ServerConfig struct {
 	// The bucket manager is responsible for setting up buckets.
 	BucketManager gcsx.BucketManager
 
+	// Experimental, do not use. Encrypts entire mount.
+	AESKey []byte
+
 	// The name of the specific GCS bucket to be mounted. If it's empty or "_",
 	// all accessible GCS buckets are mounted as subdirectories of the FS root.
 	BucketName string
@@ -169,6 +172,7 @@ func NewFileSystem(
 		mtimeClock:                 mtimeClock,
 		cacheClock:                 cfg.CacheClock,
 		bucketManager:              cfg.BucketManager,
+		aesKey:                     cfg.AESKey,
 		localFileCache:             cfg.LocalFileCache,
 		contentCache:               contentCache,
 		implicitDirs:               cfg.ImplicitDirectories,
@@ -335,6 +339,7 @@ type fileSystem struct {
 	// Constant data
 	/////////////////////////
 
+	aesKey []byte
 	localFileCache             bool
 	contentCache               *contentcache.ContentCache
 	implicitDirs               bool
@@ -2158,6 +2163,12 @@ func (fs *fileSystem) ReadFile(
 		err = nil
 	}
 
+	if err == nil && fs.aesKey != nil {
+		fmt.Printf("I am cipher code read inode %d offset 0x%X size 0x%X realsize 0x%X\n", op.Inode, op.Offset, len(op.Dst), op.BytesRead);
+
+		err = BadCtrCrypt(fs.aesKey, op.Offset, op.Dst[:op.BytesRead])
+	}
+
 	return
 }
 
@@ -2190,6 +2201,15 @@ func (fs *fileSystem) WriteFile(
 
 	in.Lock()
 	defer in.Unlock()
+
+	if fs.aesKey != nil {
+		fmt.Printf("I am cipher code write inode %d offset 0x%X size 0x%X\n", op.Inode, op.Offset, len(op.Data))
+
+		err = BadCtrCrypt(fs.aesKey, op.Offset, op.Data)
+		if err != nil {
+			return
+		}
+	}
 
 	// Serve the request.
 	if err := in.Write(ctx, op.Data, op.Offset); err != nil {

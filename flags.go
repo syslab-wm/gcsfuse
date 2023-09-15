@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"encoding/hex"
 
 	"github.com/googlecloudplatform/gcsfuse/internal/config"
 	"github.com/googlecloudplatform/gcsfuse/internal/logger"
@@ -72,6 +73,11 @@ func newApp() (app *cli.App) {
 		Usage:   "Mount a specified GCS bucket or all accessible buckets locally",
 		Writer:  os.Stderr,
 		Flags: []cli.Flag{
+			cli.StringFlag{
+				Name:  "aes-key",
+				Value: "",
+				Usage: "Experimental, do not use. AES-128 key in hex for encrypting entire mount.",
+			},
 
 			cli.StringFlag{
 				Name:  "app-name",
@@ -360,6 +366,8 @@ type flagStorage struct {
 	Foreground bool
 	ConfigFile string
 
+	AESKey []byte
+
 	// File system
 	MountOptions   map[string]string
 	DirMode        os.FileMode
@@ -490,12 +498,35 @@ func populateFlags(c *cli.Context) (flags *flagStorage, err error) {
 		}
 	}
 
+	aesKeyStr := c.String("aes-key")
+	var aesKey []byte
+
+	if aesKeyStr == "" {
+		aesKey = nil
+	} else {
+		aesKey, err = hex.DecodeString(aesKeyStr)
+		if err != nil {
+			err = fmt.Errorf("could not parse aes-key: %w", err)
+			return
+		}
+		if len(aesKey) != 16 {
+			err = fmt.Errorf("wrong length for aes-key: %d != 16", len(aesKey))
+			return
+		}
+	}
+
 	clientProtocolString := strings.ToLower(c.String("client-protocol"))
 	clientProtocol := mountpkg.ClientProtocol(clientProtocolString)
+	fmt.Println(c.String("aes-key"))
+	fmt.Println(len(c.String("aes-key")))
+	fmt.Println(aesKey)
+	fmt.Println(len(aesKey))
 	flags = &flagStorage{
 		AppName:    c.String("app-name"),
 		Foreground: c.Bool("foreground"),
 		ConfigFile: c.String("config-file"),
+
+		AESKey: aesKey,
 
 		// File system
 		MountOptions:   make(map[string]string),
