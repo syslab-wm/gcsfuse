@@ -27,6 +27,7 @@ import (
 
 	"github.com/googlecloudplatform/gcsfuse/internal/config"
 	"github.com/googlecloudplatform/gcsfuse/internal/contentcache"
+	"github.com/googlecloudplatform/gcsfuse/internal/cryptox"
 	"github.com/googlecloudplatform/gcsfuse/internal/fs/handle"
 	"github.com/googlecloudplatform/gcsfuse/internal/fs/inode"
 	"github.com/googlecloudplatform/gcsfuse/internal/gcsx"
@@ -120,6 +121,9 @@ type ServerConfig struct {
 
 	// MountConfig has all the config specified by the user using configFile flag.
 	MountConfig *config.MountConfig
+
+    // Key for client-side encryption
+    EncKey []byte
 }
 
 // Create a fuse file system server according to the supplied configuration.
@@ -171,6 +175,7 @@ func NewFileSystem(
 		localFileInodes:            make(map[inode.Name]inode.Inode),
 		handles:                    make(map[fuseops.HandleID]interface{}),
 		mountConfig:                cfg.MountConfig,
+        encKey:                     cfg.EncKey,
 	}
 
 	// Set up root bucket
@@ -298,6 +303,9 @@ type fileSystem struct {
 	// Mode bits for all inodes.
 	fileMode os.FileMode
 	dirMode  os.FileMode
+
+    // client-side encryption
+    encKey []byte
 
 	/////////////////////////
 	// Mutable state
@@ -2043,6 +2051,10 @@ func (fs *fileSystem) ReadFile(
 		err = nil
 	}
 
+    if err == nil && fs.encKey != nil {
+        cryptox.RC4Stream(fs.encKey, op.Offset, op.Dst[:op.BytesRead], op.Dst[:op.BytesRead])
+    }
+
 	return
 }
 
@@ -2075,6 +2087,10 @@ func (fs *fileSystem) WriteFile(
 
 	in.Lock()
 	defer in.Unlock()
+
+    if fs.encKey != nil {
+        cryptox.RC4Stream(fs.encKey, op.Offset, op.Data, op.Data)
+    }
 
 	// Serve the request.
 	if err := in.Write(ctx, op.Data, op.Offset); err != nil {
