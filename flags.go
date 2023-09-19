@@ -133,10 +133,10 @@ func newApp() (app *cli.App) {
 				Usage: "Allow rename a directory containing fewer descendants than this limit.",
 			},
 
-            cli.StringFlag{
-                Name: "enc-key-file",
-                Usage: "File that contains the key for client-side encryption",
-            },
+			cli.StringFlag{
+				Name:  "enc-key-file",
+				Usage: "File that contains the key for client-side encryption",
+			},
 
 			/////////////////////////
 			// GCS
@@ -373,7 +373,7 @@ type flagStorage struct {
 	ImplicitDirs   bool
 	OnlyDir        string
 	RenameDirLimit int64
-    EncKeyFile     string
+	EncKeyFile     string
 
 	// GCS
 	CustomEndpoint                     *url.URL

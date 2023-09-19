@@ -38,18 +38,18 @@ const minEncKeySize = 1
 const maxEncKeySize = 256
 
 func readEncKeyFile(path string) (key []byte, err error) {
-    key, err = os.ReadFile(path)
-    if err != nil {
-        return
-    }
+	key, err = os.ReadFile(path)
+	if err != nil {
+		return
+	}
 
-    if len(key) < minEncKeySize || len(key) > maxEncKeySize {
-        err = fmt.Errorf("expected enc key to be [%d, %d] bytes long; got %d",
-                minEncKeySize, maxEncKeySize, len(key))
-        return
-    }
+	if len(key) < minEncKeySize || len(key) > maxEncKeySize {
+		err = fmt.Errorf("expected enc key to be [%d, %d] bytes long; got %d",
+			minEncKeySize, maxEncKeySize, len(key))
+		return
+	}
 
-    return
+	return
 }
 
 // Mount the file system based on the supplied arguments, returning a
@@ -79,16 +79,15 @@ func mountWithStorageHandle(
 		}
 	}
 
-
-    var encKey []byte
-    if flags.EncKeyFile != "" {
-        encKey, err = readEncKeyFile(flags.EncKeyFile)
-        if err != nil {
+	var encKey []byte
+	if flags.EncKeyFile != "" {
+		encKey, err = readEncKeyFile(flags.EncKeyFile)
+		if err != nil {
 			err = fmt.Errorf("error reading enc-key-file: %w", err)
-            return
-        }
-	    logger.Infof("using enc key %q", encKey)
-    } 
+			return
+		}
+		logger.Infof("using enc key %q", encKey)
+	}
 
 	// Find the current process's UID and GID. If it was invoked as root and the
 	// user hasn't explicitly overridden --uid, everything is going to be owned
@@ -148,7 +147,7 @@ be interacting with the file system.`)
 		SequentialReadSizeMb:       flags.SequentialReadSizeMb,
 		EnableNonexistentTypeCache: flags.EnableNonexistentTypeCache,
 		MountConfig:                mountConfig,
-        EncKey:                     encKey,
+		EncKey:                     encKey,
 	}
 
 	logger.Infof("Creating a new server...\n")

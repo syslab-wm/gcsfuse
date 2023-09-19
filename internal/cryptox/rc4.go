@@ -15,31 +15,30 @@
 package cryptox
 
 import (
-    "crypto/rc4"
+	"crypto/rc4"
 	"github.com/googlecloudplatform/gcsfuse/internal/logger"
 )
 
 const bufSize = 64
 
 func RC4Stream(key []byte, off int64, dst, src []byte) {
-    var tot int64
+	var tot int64
 
-    ciph, err := rc4.NewCipher(key)
-    if err != nil {
-        logger.Fatal("can't create RC4 cipher: %v", err)
-    }
+	ciph, err := rc4.NewCipher(key)
+	if err != nil {
+		logger.Fatal("can't create RC4 cipher: %v", err)
+	}
 
-    // produce the stream up until the point of `off`
-    ciphertext := make([]byte, bufSize)
-    zeros := make([]byte, bufSize)
+	// produce the stream up until the point of `off`
+	ciphertext := make([]byte, bufSize)
+	zeros := make([]byte, bufSize)
 
-    for tot < off {
-        left := off - tot
-        n := min(left, bufSize)
-        ciph.XORKeyStream(ciphertext, zeros[:n])
-        tot += n
-    }
+	for tot < off {
+		left := off - tot
+		n := min(left, bufSize)
+		ciph.XORKeyStream(ciphertext, zeros[:n])
+		tot += n
+	}
 
-    ciph.XORKeyStream(dst, src)
+	ciph.XORKeyStream(dst, src)
 }
-

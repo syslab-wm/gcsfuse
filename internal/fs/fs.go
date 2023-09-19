@@ -122,8 +122,8 @@ type ServerConfig struct {
 	// MountConfig has all the config specified by the user using configFile flag.
 	MountConfig *config.MountConfig
 
-    // Key for client-side encryption
-    EncKey []byte
+	// Key for client-side encryption
+	EncKey []byte
 }
 
 // Create a fuse file system server according to the supplied configuration.
@@ -175,7 +175,7 @@ func NewFileSystem(
 		localFileInodes:            make(map[inode.Name]inode.Inode),
 		handles:                    make(map[fuseops.HandleID]interface{}),
 		mountConfig:                cfg.MountConfig,
-        encKey:                     cfg.EncKey,
+		encKey:                     cfg.EncKey,
 	}
 
 	// Set up root bucket
@@ -304,8 +304,8 @@ type fileSystem struct {
 	fileMode os.FileMode
 	dirMode  os.FileMode
 
-    // client-side encryption
-    encKey []byte
+	// client-side encryption
+	encKey []byte
 
 	/////////////////////////
 	// Mutable state
@@ -2051,9 +2051,9 @@ func (fs *fileSystem) ReadFile(
 		err = nil
 	}
 
-    if err == nil && fs.encKey != nil {
-        cryptox.RC4Stream(fs.encKey, op.Offset, op.Dst[:op.BytesRead], op.Dst[:op.BytesRead])
-    }
+	if err == nil && fs.encKey != nil {
+		cryptox.RC4Stream(fs.encKey, op.Offset, op.Dst[:op.BytesRead], op.Dst[:op.BytesRead])
+	}
 
 	return
 }
@@ -2088,9 +2088,9 @@ func (fs *fileSystem) WriteFile(
 	in.Lock()
 	defer in.Unlock()
 
-    if fs.encKey != nil {
-        cryptox.RC4Stream(fs.encKey, op.Offset, op.Data, op.Data)
-    }
+	if fs.encKey != nil {
+		cryptox.RC4Stream(fs.encKey, op.Offset, op.Data, op.Data)
+	}
 
 	// Serve the request.
 	if err := in.Write(ctx, op.Data, op.Offset); err != nil {
