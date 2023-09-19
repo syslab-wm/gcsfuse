@@ -15,10 +15,12 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
 	"github.com/googlecloudplatform/gcsfuse/internal/config"
+	"github.com/googlecloudplatform/gcsfuse/internal/cryptox"
 	"github.com/googlecloudplatform/gcsfuse/internal/storage"
 	"golang.org/x/net/context"
 
@@ -56,6 +58,31 @@ func mountWithStorageHandle(
 				err.Error())
 			return
 		}
+	}
+
+	var encKey, iv []byte
+	if flags.EncKeyFile != "" {
+		encKey, err = cryptox.ReadKeyFile(flags.EncKeyFile)
+		if err != nil {
+			err = fmt.Errorf("error reading --enc-key-file: %w", err)
+			return
+		}
+		logger.Infof("using enc key: %q", encKey)
+
+		if flags.IVFile == "" {
+			err = errors.New("--iv-file must be specified with --enc-key-file")
+			return
+		}
+
+		iv, err = cryptox.ReadIVFile(flags.IVFile)
+		if err != nil {
+			err = fmt.Errorf("error reading --iv-file: %w", err)
+			return
+		}
+		logger.Infof("using IV: %q", iv)
+	} else if flags.IVFile != "" {
+		err = errors.New("--enc-key-file must be specified with --iv-file")
+		return
 	}
 
 	// Find the current process's UID and GID. If it was invoked as root and the
@@ -116,6 +143,8 @@ be interacting with the file system.`)
 		SequentialReadSizeMb:       flags.SequentialReadSizeMb,
 		EnableNonexistentTypeCache: flags.EnableNonexistentTypeCache,
 		MountConfig:                mountConfig,
+		EncKey:                     encKey,
+		IV:                         iv,
 	}
 
 	logger.Infof("Creating a new server...\n")

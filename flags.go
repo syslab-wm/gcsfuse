@@ -133,6 +133,16 @@ func newApp() (app *cli.App) {
 				Usage: "Allow rename a directory containing fewer descendants than this limit.",
 			},
 
+			cli.StringFlag{
+				Name:  "enc-key-file",
+				Usage: "File that contains the key for client-side encryption",
+			},
+
+			cli.StringFlag{
+				Name:  "iv-file",
+				Usage: "File that contains the IV for client-side encryption",
+			},
+
 			/////////////////////////
 			// GCS
 			/////////////////////////
@@ -368,6 +378,8 @@ type flagStorage struct {
 	ImplicitDirs   bool
 	OnlyDir        string
 	RenameDirLimit int64
+	EncKeyFile     string
+	IVFile         string
 
 	// GCS
 	CustomEndpoint                     *url.URL
@@ -443,6 +455,16 @@ func resolvePathForTheFlagsInContext(c *cli.Context) (err error) {
 		return fmt.Errorf("resolving for config-file: %w", err)
 	}
 
+	err = resolvePathForTheFlagInContext("enc-key-file", c)
+	if err != nil {
+		return fmt.Errorf("resolving for enc-key-file: %w", err)
+	}
+
+	err = resolvePathForTheFlagInContext("iv-file", c)
+	if err != nil {
+		return fmt.Errorf("resolving for iv-file: %w", err)
+	}
+
 	return
 }
 
@@ -478,6 +500,8 @@ func populateFlags(c *cli.Context) (flags *flagStorage, err error) {
 		ImplicitDirs:   c.Bool("implicit-dirs"),
 		OnlyDir:        c.String("only-dir"),
 		RenameDirLimit: int64(c.Int("rename-dir-limit")),
+		EncKeyFile:     c.String("enc-key-file"),
+		IVFile:         c.String("iv-file"),
 
 		// GCS,
 		CustomEndpoint:                     customEndpoint,
