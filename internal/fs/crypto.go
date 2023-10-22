@@ -4,7 +4,10 @@ import (
 	//"fmt"
 	"crypto/aes"
 	"crypto/cipher"
+	"math/rand"
 )
+
+const BlockSize = 64 * 1024
 
 // Increments a big-endian byte array by an integer. Good for ctr cipher things.
 // Go might have a builtin way to do this but idk what it is
@@ -23,6 +26,61 @@ func incCtr(ctr []byte, inc int64) {
 			break
 		}
 	}
+}
+
+func GcmSeal(
+	key []byte,
+	buf []byte,
+	additionalData []byte) (nonce []byte, tag []byte, err error) {
+	blockCipher, err := aes.NewCipher(key)
+	if err != nil {
+		return
+	}
+
+	gcmCipher, err := cipher.NewGCM(blockCipher)
+	if err != nil {
+		return
+	}
+
+	nonce = make([]byte, gcmCipher.NonceSize())
+	rand.Read(nonce)
+
+	cipherText := gcmCipher.Seal(buf[:0], nonce, buf, additionalData)
+	tag = cipherText[len(buf):]
+
+	// If the underlying array didn't have enough space for the tag, cipher lib might have quietly reallocated
+	if &buf[0] != &cipherText[0] {
+		copy(buf, cipherText)
+	}
+
+	return
+}
+
+func GcmOpen(
+	key []byte,
+	nonce []byte,
+	buf []byte,
+	additionalData []byte,
+	tag []byte) (err error) {
+	blockCipher, err := aes.NewCipher(key)
+	if err != nil {
+		return
+	}
+
+	gcmCipher, err := cipher.NewGCM(blockCipher)
+	if err != nil {
+		return
+	}
+
+	workbuf := make([]byte, len(buf) + len(tag))
+	copy(workbuf, buf)
+	copy(workbuf[len(buf):], tag)
+
+	plainText, err := gcmCipher.Open(workbuf[:0], nonce, workbuf, additionalData)
+
+	copy(buf, plainText)
+
+	return
 }
 
 func BadCtrCrypt(

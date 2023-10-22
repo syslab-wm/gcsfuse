@@ -16,6 +16,7 @@ package fs
 
 import (
 	"errors"
+	b64 "encoding/base64"
 	"fmt"
 	"io"
 	iofs "io/fs"
@@ -2155,19 +2156,59 @@ func (fs *fileSystem) ReadFile(
 	fh.Lock()
 	defer fh.Unlock()
 
-	// Serve the read.
-	op.BytesRead, err = fh.Read(ctx, op.Dst, op.Offset, fs.sequentialReadSizeMb)
+	meta := fh.Inode().Source().Metadata
+	do_crypt := fs.aesKey != nil && meta["gcsfuse_crypt"] == "1"
+	if !do_crypt {
+		// Serve the read.
+		op.BytesRead, err = fh.Read(ctx, op.Dst, op.Offset, fs.sequentialReadSizeMb)
 
-	// As required by fuse, we don't treat EOF as an error.
+		// As required by fuse, we don't treat EOF as an error.
+		if err == io.EOF {
+			err = nil
+		}
+
+		return
+	}
+
+	fmt.Printf("I am cipher code read inode %d offset 0x%X size 0x%X\n", op.Inode, op.Offset, len(op.Dst));
+
+	attr, err := fh.Inode().Attributes(ctx)
+	if err != nil {
+		return
+	}
+
+	// TODO: allocate extra here to avoid dumb reallocation
+	buf := make([]byte, attr.Size)
+	br, err := fh.Read(ctx, buf, 0, fs.sequentialReadSizeMb)
+	if br != int(attr.Size) {
+		// TODO: find better way to fail here
+		panic("full read failed")
+	}
+
 	if err == io.EOF {
 		err = nil
 	}
 
-	if err == nil && fs.aesKey != nil {
-		fmt.Printf("I am cipher code read inode %d offset 0x%X size 0x%X realsize 0x%X\n", op.Inode, op.Offset, len(op.Dst), op.BytesRead);
-
-		err = BadCtrCrypt(fs.aesKey, op.Offset, op.Dst[:op.BytesRead])
+	if err != nil {
+		return
 	}
+
+	nonce, err := b64.URLEncoding.DecodeString(meta["n"])
+	if err != nil {
+		return
+	}
+
+	tag, err := b64.URLEncoding.DecodeString(meta["t"])
+	if err != nil {
+		return
+	}
+
+	err = GcmOpen(fs.aesKey, nonce, buf, nil, tag)
+	if err != nil {
+		return
+	}
+
+	op.BytesRead = copy(op.Dst, buf[op.Offset:])
 
 	return
 }
@@ -2202,20 +2243,93 @@ func (fs *fileSystem) WriteFile(
 	in.Lock()
 	defer in.Unlock()
 
-	if fs.aesKey != nil {
-		fmt.Printf("I am cipher code write inode %d offset 0x%X size 0x%X\n", op.Inode, op.Offset, len(op.Data))
+	meta := in.Source().Metadata
+	// TODO: respect lack of this flag and set it on file creation instead
+	do_crypt := fs.aesKey != nil// && meta["gcsfuse_crypt"] == "1"
 
-		err = BadCtrCrypt(fs.aesKey, op.Offset, op.Data)
+	if !do_crypt {
+		err = in.Write(ctx, op.Data, op.Offset)
+
+		return
+	}
+
+	fmt.Printf("I am cipher code write inode %d offset 0x%X size 0x%X\n", op.Inode, op.Offset, len(op.Data))
+
+	attr, err := in.Attributes(ctx)
+	if err != nil {
+		return
+	}
+
+	size := attr.Size
+	writeEnd := uint64(op.Offset) + uint64(len(op.Data))
+	if writeEnd > size {
+		size = writeEnd
+	}
+
+	// TODO: a lot of this is duplicated from read code and should be consolidated
+	buf := make([]byte, size)
+	br, err := in.Read(ctx, buf[:attr.Size], 0)
+	if br != int(attr.Size) {
+		// TODO: find better way to fail here
+		panic("full read failed")
+	}
+
+	if err == io.EOF {
+		err = nil
+	}
+
+	if err != nil {
+		return
+	}
+
+	if meta["gcsfuse_crypt"] != "1" {
+		err = in.SetMetaEntry(ctx, "gcsfuse_crypt", "1")
+
+		if err != nil {
+			return
+		}
+	} else if attr.Size != 0 {
+		var tag, nonce []byte
+
+		nonce, err = b64.URLEncoding.DecodeString(meta["n"])
+		if err != nil {
+			return
+		}
+
+		tag, err = b64.URLEncoding.DecodeString(meta["t"])
+		if err != nil {
+			return
+		}
+
+		fmt.Println("writeread: nonce", nonce, "tag", tag, "size", attr.Size)
+
+		err = GcmOpen(fs.aesKey, nonce, buf[:attr.Size], nil, tag)
 		if err != nil {
 			return
 		}
 	}
 
-	// Serve the request.
-	if err := in.Write(ctx, op.Data, op.Offset); err != nil {
-		return err
+	copy(buf[op.Offset:], op.Data)
+
+	nonce, tag, err := GcmSeal(fs.aesKey, buf, nil)
+	if err != nil {
+		return
 	}
 
+	// TODO: assemble all the metadata modifications here into a single request before sending them to google
+	// doing things like this is slow
+	err = in.SetMetaEntry(ctx, "n", b64.URLEncoding.EncodeToString(nonce))
+	if err != nil {
+		return
+	}
+
+	err = in.SetMetaEntry(ctx, "t", b64.URLEncoding.EncodeToString(tag))
+	if err != nil {
+		return
+	}
+
+	err = in.Write(ctx, buf, 0)
+fmt.Println("wrote: nonce", nonce, "tag", tag, "size", len(buf))
 	return
 }
 

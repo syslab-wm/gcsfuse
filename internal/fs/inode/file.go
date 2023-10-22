@@ -481,6 +481,32 @@ func (f *FileInode) Write(
 	return
 }
 
+// Set the entry for a given key in the file's metadata. Always makes a round trip to GCS.
+//
+// LOCKS_REQUIRED(f.mu)
+func (f *FileInode) SetMetaEntry(
+	ctx context.Context,
+	key string,
+	value string) (err error) {
+	srcGen := f.SourceGeneration()
+
+	req := &gcs.UpdateObjectRequest{
+		Name:                       f.src.Name,
+		Generation:                 srcGen.Object,
+		MetaGenerationPrecondition: &srcGen.Metadata,
+		Metadata: map[string]*string{
+			key: &value,
+		},
+	}
+
+	o, err := f.bucket.UpdateObject(ctx, req)
+	if err == nil {
+		f.src = convertObjToMinObject(o)
+	}
+
+	return
+}
+
 // Set the mtime for this file. May involve a round trip to GCS.
 //
 // LOCKS_REQUIRED(f.mu)
@@ -513,18 +539,7 @@ func (f *FileInode) SetMtime(
 
 	// Otherwise, update the backing object's metadata.
 	formatted := mtime.UTC().Format(time.RFC3339Nano)
-	srcGen := f.SourceGeneration()
-
-	req := &gcs.UpdateObjectRequest{
-		Name:                       f.src.Name,
-		Generation:                 srcGen.Object,
-		MetaGenerationPrecondition: &srcGen.Metadata,
-		Metadata: map[string]*string{
-			FileMtimeMetadataKey: &formatted,
-		},
-	}
-
-	o, err := f.bucket.UpdateObject(ctx, req)
+	err = f.SetMetaEntry(ctx, FileMtimeMetadataKey, formatted)
 	if err == nil {
 		var minObj gcs.MinObject
 		minObjPtr := storageutil.ConvertObjToMinObject(o)
