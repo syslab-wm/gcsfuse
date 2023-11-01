@@ -4,7 +4,7 @@ import (
 	//"fmt"
 	"crypto/aes"
 	"crypto/cipher"
-	"math/rand"
+	"crypto/rand"
 )
 
 const BlockSize = 64 * 1024
