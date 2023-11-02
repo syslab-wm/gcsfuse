@@ -15,8 +15,8 @@
 package fs
 
 import (
-	"errors"
 	b64 "encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	iofs "io/fs"
@@ -2140,6 +2140,8 @@ func (fs *fileSystem) OpenFile(
 	return
 }
 
+// BIG TODO: figure out the best way to solve padding. right now this code creates a bunch of junk 0s in the plaintext which is bad
+
 // LOCKS_EXCLUDED(fs.mu)
 func (fs *fileSystem) ReadFile(
 	ctx context.Context,
@@ -2157,7 +2159,7 @@ func (fs *fileSystem) ReadFile(
 	defer fh.Unlock()
 
 	meta := fh.Inode().Source().Metadata
-	do_crypt := fs.aesKey != nil && meta["gcsfuse_crypt"] == "1"
+	do_crypt := fs.aesKey != nil && meta["gcsfuse_crypt"] == "2"
 	if !do_crypt {
 		// Serve the read.
 		op.BytesRead, err = fh.Read(ctx, op.Dst, op.Offset, fs.sequentialReadSizeMb)
@@ -2170,20 +2172,20 @@ func (fs *fileSystem) ReadFile(
 		return
 	}
 
-	fmt.Printf("I am cipher code read inode %d offset 0x%X size 0x%X\n", op.Inode, op.Offset, len(op.Dst));
+	offsBlocks := op.Offset / BlockSize
+	startPadSize := int64(len(op.Dst)) + (op.Offset % BlockSize)
+	sizeBlocks := (startPadSize - 1) / BlockSize + 1
+	padSize := sizeBlocks * BlockSize
 
-	attr, err := fh.Inode().Attributes(ctx)
+	fmt.Printf("I am cipher code read inode %d offset 0x%X size 0x%X offsBlocks 0x%X sizeBlocks 0x%X\n", op.Inode, op.Offset, len(op.Dst), offsBlocks, sizeBlocks);
+
+	/*attr, err := fh.Inode().Attributes(ctx)
 	if err != nil {
 		return
-	}
+	}*/
 
-	// TODO: allocate extra here to avoid dumb reallocation
-	buf := make([]byte, attr.Size)
-	br, err := fh.Read(ctx, buf, 0, fs.sequentialReadSizeMb)
-	if br != int(attr.Size) {
-		// TODO: find better way to fail here
-		panic("full read failed")
-	}
+	buf := make([]byte, padSize)
+	br, err := fh.Read(ctx, buf, offsBlocks * BlockSize, fs.sequentialReadSizeMb)
 
 	if err == io.EOF {
 		err = nil
@@ -2193,22 +2195,30 @@ func (fs *fileSystem) ReadFile(
 		return
 	}
 
-	nonce, err := b64.URLEncoding.DecodeString(meta["n"])
-	if err != nil {
-		return
+	sizeBlocks = (int64(br) - 1) / BlockSize + 1
+
+	for i := int64(0); i < sizeBlocks; i++ {
+		var nonce, tag []byte
+		block := i + offsBlocks
+
+		nonce, err = b64.URLEncoding.DecodeString(meta[fmt.Sprintf("n%d", block)])
+		if err != nil {
+			return
+		}
+
+		tag, err = b64.URLEncoding.DecodeString(meta[fmt.Sprintf("t%d", block)])
+		if err != nil {
+			return
+		}
+
+		// TODO: verify path, block ID, etc as addtional data
+		err = GcmOpen(fs.aesKey, nonce, buf[i * BlockSize:(i + 1) * BlockSize], nil, tag)
+		if err != nil {
+			return
+		}
 	}
 
-	tag, err := b64.URLEncoding.DecodeString(meta["t"])
-	if err != nil {
-		return
-	}
-
-	err = GcmOpen(fs.aesKey, nonce, buf, nil, tag)
-	if err != nil {
-		return
-	}
-
-	op.BytesRead = copy(op.Dst, buf[op.Offset:])
+	op.BytesRead = copy(op.Dst, buf[op.Offset - offsBlocks * BlockSize:])
 
 	return
 }
@@ -2245,7 +2255,7 @@ func (fs *fileSystem) WriteFile(
 
 	meta := in.Source().Metadata
 	// TODO: respect lack of this flag and set it on file creation instead
-	do_crypt := fs.aesKey != nil// && meta["gcsfuse_crypt"] == "1"
+	do_crypt := fs.aesKey != nil// && meta["gcsfuse_crypt"] == "2"
 
 	if !do_crypt {
 		err = in.Write(ctx, op.Data, op.Offset)
@@ -2253,83 +2263,141 @@ func (fs *fileSystem) WriteFile(
 		return
 	}
 
-	fmt.Printf("I am cipher code write inode %d offset 0x%X size 0x%X\n", op.Inode, op.Offset, len(op.Data))
+	offsBlocks := op.Offset / BlockSize
+	startPadSize := int64(len(op.Data)) + (op.Offset % BlockSize)
+	sizeBlocks := (startPadSize - 1) / BlockSize + 1
+	padSize := sizeBlocks * BlockSize
+	//writeEnd := uint64(op.Offset) + uint64(len(op.Data))
+
+	fmt.Printf("I am cipher code write inode %d offset 0x%X size 0x%X offsBlocks 0x%X sizeBlocks 0x%X\n", op.Inode, op.Offset, len(op.Data), offsBlocks, sizeBlocks);
+
+	// TODO: a lot of the following is duplicated from read code and should be consolidated
+
+	buf := make([]byte, padSize)
+
+	// TODO: do this on file creation instead
+	if meta["gcsfuse_crypt"] != "2" {
+		err = in.SetMetaEntry(ctx, "gcsfuse_crypt", "2")
+
+		if err != nil {
+			return
+		}
+	}
 
 	attr, err := in.Attributes(ctx)
 	if err != nil {
 		return
 	}
 
-	size := attr.Size
-	writeEnd := uint64(op.Offset) + uint64(len(op.Data))
-	if writeEnd > size {
-		size = writeEnd
-	}
-
-	// TODO: a lot of this is duplicated from read code and should be consolidated
-	buf := make([]byte, size)
-	br, err := in.Read(ctx, buf[:attr.Size], 0)
-	if br != int(attr.Size) {
-		// TODO: find better way to fail here
-		panic("full read failed")
-	}
-
-	if err == io.EOF {
-		err = nil
-	}
-
-	if err != nil {
-		return
-	}
-
-	if meta["gcsfuse_crypt"] != "1" {
-		err = in.SetMetaEntry(ctx, "gcsfuse_crypt", "1")
-
-		if err != nil {
-			return
-		}
-	} else if attr.Size != 0 {
+	// Start offset is in the middle of a block and there's already data in it
+	if op.Offset % BlockSize != 0 && int64(attr.Size) > op.Offset {
 		var tag, nonce []byte
 
-		nonce, err = b64.URLEncoding.DecodeString(meta["n"])
+		nonce, err = b64.URLEncoding.DecodeString(meta[fmt.Sprintf("n%d", offsBlocks)])
 		if err != nil {
 			return
 		}
 
-		tag, err = b64.URLEncoding.DecodeString(meta["t"])
+		tag, err = b64.URLEncoding.DecodeString(meta[fmt.Sprintf("t%d", offsBlocks)])
 		if err != nil {
 			return
 		}
 
-		fmt.Println("writeread: nonce", nonce, "tag", tag, "size", attr.Size)
+		fmt.Println("writeread: nonce", nonce, "tag", tag, "block", offsBlocks)
 
-		err = GcmOpen(fs.aesKey, nonce, buf[:attr.Size], nil, tag)
+		var br int
+		br, err = in.Read(ctx, buf[:BlockSize], offsBlocks * BlockSize)
+
+		if br != BlockSize {
+			// TODO: find better way to fail here or rework thing to not pad the file
+			panic("file size wasn't block multiple")
+		}
+
+		if err == io.EOF {
+			err = nil
+		}
+
+		if err != nil {
+			return
+		}
+
+		// TODO: verify path, block ID, etc as addtional data
+		err = GcmOpen(fs.aesKey, nonce, buf[:BlockSize], nil, tag)
 		if err != nil {
 			return
 		}
 	}
 
-	copy(buf[op.Offset:], op.Data)
+	// End offset in the middle of a block, there's already data in it, and we didn't just read this same block in the above code
+	if startPadSize % BlockSize != 0 && int64(attr.Size) > (offsBlocks * BlockSize) + startPadSize &&
+		!(sizeBlocks == 1 && op.Offset % BlockSize != 0) {
+		var tag, nonce []byte
+		lastBlock := offsBlocks + sizeBlocks - 1
 
-	nonce, tag, err := GcmSeal(fs.aesKey, buf, nil)
-	if err != nil {
-		return
+		nonce, err = b64.URLEncoding.DecodeString(meta[fmt.Sprintf("n%d", lastBlock)])
+		if err != nil {
+			return
+		}
+
+		tag, err = b64.URLEncoding.DecodeString(meta[fmt.Sprintf("t%d", lastBlock)])
+		if err != nil {
+			return
+		}
+
+		fmt.Println("writeread: nonce", nonce, "tag", tag, "block", lastBlock)
+
+		var br int
+		br, err = in.Read(ctx, buf[padSize - BlockSize:], lastBlock * BlockSize)
+
+		if br != BlockSize {
+			// TODO: find better way to fail here or rework thing to not pad the file
+			panic("file size wasn't block multiple")
+		}
+
+		if err == io.EOF {
+			err = nil
+		}
+
+		if err != nil {
+			return
+		}
+
+		// TODO: verify path, block ID, etc as addtional data
+		err = GcmOpen(fs.aesKey, nonce, buf[padSize - BlockSize:], nil, tag)
+		if err != nil {
+			return
+		}
 	}
 
-	// TODO: assemble all the metadata modifications here into a single request before sending them to google
-	// doing things like this is slow
-	err = in.SetMetaEntry(ctx, "n", b64.URLEncoding.EncodeToString(nonce))
-	if err != nil {
-		return
+	copy(buf[op.Offset % BlockSize:], op.Data)
+
+	for i := int64(0); i < sizeBlocks; i++ {
+		var nonce, tag []byte
+		block := i + offsBlocks
+
+		// TODO: verify path, block ID, etc as addtional data
+		nonce, tag, err = GcmSeal(fs.aesKey, buf[i * BlockSize:(i + 1) * BlockSize], nil)
+		if err != nil {
+			return
+		}
+
+		// TODO: assemble all the metadata modifications here into a single request before sending them to google
+		// doing things like this is slow
+		err = in.SetMetaEntry(ctx, fmt.Sprintf("n%d", block), b64.URLEncoding.EncodeToString(nonce))
+		if err != nil {
+			return
+		}
+
+		err = in.SetMetaEntry(ctx, fmt.Sprintf("t%d", block), b64.URLEncoding.EncodeToString(tag))
+		if err != nil {
+			return
+		}
+
+		fmt.Println("wrote: nonce", nonce, "tag", tag, "block", block)
 	}
 
-	err = in.SetMetaEntry(ctx, "t", b64.URLEncoding.EncodeToString(tag))
-	if err != nil {
-		return
-	}
+	err = in.Write(ctx, buf, offsBlocks * BlockSize)
 
-	err = in.Write(ctx, buf, 0)
-fmt.Println("wrote: nonce", nonce, "tag", tag, "size", len(buf))
 	return
 }
 
