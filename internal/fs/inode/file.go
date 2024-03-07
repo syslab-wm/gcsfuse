@@ -501,7 +501,12 @@ func (f *FileInode) SetMetaEntry(
 
 	o, err := f.bucket.UpdateObject(ctx, req)
 	if err == nil {
-		f.src = convertObjToMinObject(o)
+		var minObj gcs.MinObject
+		minObjPtr := storageutil.ConvertObjToMinObject(o)
+		if minObjPtr != nil {
+			minObj = *minObjPtr
+		}
+		f.src = minObj
 	}
 
 	return
@@ -541,12 +546,6 @@ func (f *FileInode) SetMtime(
 	formatted := mtime.UTC().Format(time.RFC3339Nano)
 	err = f.SetMetaEntry(ctx, FileMtimeMetadataKey, formatted)
 	if err == nil {
-		var minObj gcs.MinObject
-		minObjPtr := storageutil.ConvertObjToMinObject(o)
-		if minObjPtr != nil {
-			minObj = *minObjPtr
-		}
-		f.src = minObj
 		return
 	}
 
