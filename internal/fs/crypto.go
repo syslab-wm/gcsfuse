@@ -1,68 +1,63 @@
 package fs
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
+	//"crypto/aes"
+	//"crypto/cipher"
 	"crypto/rand"
+
+	"github.com/syslab-wm/nestedaes"
+	//"github.com/syslab-wm/nestedaes/internal/aesx"
 )
 
 const BlockSize = 64 * 1024
 
-func GcmSeal(
+// TODO: add additionaldata to nestedaes
+func NestedSeal(
 	key []byte,
-	buf []byte,
-	additionalData []byte) (nonce []byte, tag []byte, err error) {
-	blockCipher, err := aes.NewCipher(key)
-	if err != nil {
-		return
-	}
+	buf []byte) (header []byte, err error) {
 
-	gcmCipher, err := cipher.NewGCM(blockCipher)
-	if err != nil {
-		return
-	}
-
-	nonce = make([]byte, gcmCipher.NonceSize())
+	// TODO: don't hardcode iv size
+	nonce := make([]byte, 16)
 	rand.Read(nonce)
 
-	workBuf := make([]byte, len(buf) + gcmCipher.Overhead())
-	cipherText := gcmCipher.Seal(workBuf[:0], nonce, buf, additionalData)
-	tag = cipherText[len(buf):]
+	cipherText, err := nestedaes.Encrypt(buf, key, nonce)
+	if err != nil {
+		return
+	}
 
-	copy(buf, cipherText)
+	header, payload, err := nestedaes.SplitHeaderPayload(cipherText)
+	if err != nil {
+		return
+	}
+
+	if len(payload) != len(buf) {
+		panic("Crypto buffer length mismatch, what is wrong with the lib")
+	}
+
+	copy(buf, payload)
 
 	return
 }
 
-func GcmOpen(
+func NestedOpen(
 	key []byte,
-	nonce []byte,
-	buf []byte,
-	additionalData []byte,
-	tag []byte) (err error) {
-	blockCipher, err := aes.NewCipher(key)
+	header []byte,
+	buf []byte) (err error) {
+
+	workBuf := make([]byte, len(header) + len(buf))
+	copy(workBuf, header)
+	copy(workBuf[len(header):], buf)
+
+	plainText, err := nestedaes.Decrypt(workBuf, key)
 	if err != nil {
 		return
 	}
-
-	gcmCipher, err := cipher.NewGCM(blockCipher)
-	if err != nil {
-		return
-	}
-
-	workBuf := make([]byte, len(buf) + len(tag))
-	copy(workBuf, buf)
-	copy(workBuf[len(buf):], tag)
-
-	plainText, err := gcmCipher.Open(buf[:0], nonce, workBuf, additionalData)
 
 	if len(buf) != len(plainText) {
-		panic("Crypto buffer length mismatch, this should not happen")
+		panic("Crypto buffer length mismatch, what is wrong with the lib")
 	}
 
-	if &buf[0] != &plainText[0] {
-		panic("Crypto reallocated when it shouldn't have, this should not happen")
-	}
+	copy(buf, plainText)
 
 	return
 }

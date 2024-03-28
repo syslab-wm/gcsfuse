@@ -2159,7 +2159,7 @@ func (fs *fileSystem) ReadFile(
 	defer fh.Unlock()
 
 	meta := fh.Inode().Source().Metadata
-	do_crypt := fs.aesKey != nil && meta["gcsfuse_crypt"] == "2"
+	do_crypt := fs.aesKey != nil && meta["gcsfuse_crypt"] == "3"
 	if !do_crypt {
 		// Serve the read.
 		op.BytesRead, err = fh.Read(ctx, op.Dst, op.Offset, fs.sequentialReadSizeMb)
@@ -2198,21 +2198,16 @@ func (fs *fileSystem) ReadFile(
 	sizeBlocks = (int64(br) - 1) / BlockSize + 1
 
 	for i := int64(0); i < sizeBlocks; i++ {
-		var nonce, tag []byte
+		var header []byte
 		block := i + offsBlocks
 
-		nonce, err = b64.URLEncoding.DecodeString(meta[fmt.Sprintf("n%d", block)])
-		if err != nil {
-			return
-		}
-
-		tag, err = b64.URLEncoding.DecodeString(meta[fmt.Sprintf("t%d", block)])
+		header, err = b64.URLEncoding.DecodeString(meta[fmt.Sprintf("h%d", block)])
 		if err != nil {
 			return
 		}
 
 		// TODO: verify path, block ID, etc as addtional data
-		err = GcmOpen(fs.aesKey, nonce, buf[i * BlockSize:(i + 1) * BlockSize], nil, tag)
+		err = NestedOpen(fs.aesKey, header, buf[i * BlockSize:(i + 1) * BlockSize])
 		if err != nil {
 			return
 		}
@@ -2276,8 +2271,8 @@ func (fs *fileSystem) WriteFile(
 	buf := make([]byte, padSize)
 
 	// TODO: do this on file creation instead
-	if meta["gcsfuse_crypt"] != "2" {
-		err = in.SetMetaEntry(ctx, "gcsfuse_crypt", "2")
+	if meta["gcsfuse_crypt"] != "3" {
+		err = in.SetMetaEntry(ctx, "gcsfuse_crypt", "3")
 
 		if err != nil {
 			return
@@ -2291,19 +2286,14 @@ func (fs *fileSystem) WriteFile(
 
 	// Start offset is in the middle of a block and there's already data in it
 	if op.Offset % BlockSize != 0 && int64(attr.Size) > op.Offset {
-		var tag, nonce []byte
+		var header []byte
 
-		nonce, err = b64.URLEncoding.DecodeString(meta[fmt.Sprintf("n%d", offsBlocks)])
+		header, err = b64.URLEncoding.DecodeString(meta[fmt.Sprintf("h%d", offsBlocks)])
 		if err != nil {
 			return
 		}
 
-		tag, err = b64.URLEncoding.DecodeString(meta[fmt.Sprintf("t%d", offsBlocks)])
-		if err != nil {
-			return
-		}
-
-		fmt.Println("writeread: nonce", nonce, "tag", tag, "block", offsBlocks)
+		fmt.Println("writeread: header", header, "block", offsBlocks)
 
 		var br int
 		br, err = in.Read(ctx, buf[:BlockSize], offsBlocks * BlockSize)
@@ -2322,7 +2312,7 @@ func (fs *fileSystem) WriteFile(
 		}
 
 		// TODO: verify path, block ID, etc as addtional data
-		err = GcmOpen(fs.aesKey, nonce, buf[:BlockSize], nil, tag)
+		err = NestedOpen(fs.aesKey, header, buf[:BlockSize])
 		if err != nil {
 			return
 		}
@@ -2331,20 +2321,15 @@ func (fs *fileSystem) WriteFile(
 	// End offset in the middle of a block, there's already data in it, and we didn't just read this same block in the above code
 	if startPadSize % BlockSize != 0 && int64(attr.Size) > (offsBlocks * BlockSize) + startPadSize &&
 		!(sizeBlocks == 1 && op.Offset % BlockSize != 0) {
-		var tag, nonce []byte
+		var header []byte
 		lastBlock := offsBlocks + sizeBlocks - 1
 
-		nonce, err = b64.URLEncoding.DecodeString(meta[fmt.Sprintf("n%d", lastBlock)])
+		header, err = b64.URLEncoding.DecodeString(meta[fmt.Sprintf("h%d", offsBlocks)])
 		if err != nil {
 			return
 		}
 
-		tag, err = b64.URLEncoding.DecodeString(meta[fmt.Sprintf("t%d", lastBlock)])
-		if err != nil {
-			return
-		}
-
-		fmt.Println("writeread: nonce", nonce, "tag", tag, "block", lastBlock)
+		fmt.Println("writeread: header", header, "block", offsBlocks)
 
 		var br int
 		br, err = in.Read(ctx, buf[padSize - BlockSize:], lastBlock * BlockSize)
@@ -2363,7 +2348,7 @@ func (fs *fileSystem) WriteFile(
 		}
 
 		// TODO: verify path, block ID, etc as addtional data
-		err = GcmOpen(fs.aesKey, nonce, buf[padSize - BlockSize:], nil, tag)
+		err = NestedOpen(fs.aesKey, header, buf[padSize - BlockSize:])
 		if err != nil {
 			return
 		}
@@ -2372,28 +2357,23 @@ func (fs *fileSystem) WriteFile(
 	copy(buf[op.Offset % BlockSize:], op.Data)
 
 	for i := int64(0); i < sizeBlocks; i++ {
-		var nonce, tag []byte
+		var header []byte
 		block := i + offsBlocks
 
 		// TODO: verify path, block ID, etc as addtional data
-		nonce, tag, err = GcmSeal(fs.aesKey, buf[i * BlockSize:(i + 1) * BlockSize], nil)
+		header, err = NestedSeal(fs.aesKey, buf[i * BlockSize:(i + 1) * BlockSize])
 		if err != nil {
 			return
 		}
 
 		// TODO: assemble all the metadata modifications here into a single request before sending them to google
 		// doing things like this is slow
-		err = in.SetMetaEntry(ctx, fmt.Sprintf("n%d", block), b64.URLEncoding.EncodeToString(nonce))
+		err = in.SetMetaEntry(ctx, fmt.Sprintf("h%d", block), b64.URLEncoding.EncodeToString(header))
 		if err != nil {
 			return
 		}
 
-		err = in.SetMetaEntry(ctx, fmt.Sprintf("t%d", block), b64.URLEncoding.EncodeToString(tag))
-		if err != nil {
-			return
-		}
-
-		fmt.Println("wrote: nonce", nonce, "tag", tag, "block", block)
+		fmt.Println("wrote: header", header, "block", block)
 	}
 
 	err = in.Write(ctx, buf, offsBlocks * BlockSize)

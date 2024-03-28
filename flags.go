@@ -509,8 +509,8 @@ func populateFlags(c *cli.Context) (flags *flagStorage, err error) {
 			err = fmt.Errorf("could not parse aes-key: %w", err)
 			return
 		}
-		if len(aesKey) != 16 {
-			err = fmt.Errorf("wrong length for aes-key: %d != 16", len(aesKey))
+		if len(aesKey) != 32 {
+			err = fmt.Errorf("wrong length for aes-key: %d != 32", len(aesKey))
 			return
 		}
 	}

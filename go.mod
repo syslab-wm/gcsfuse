@@ -1,6 +1,8 @@
 module github.com/googlecloudplatform/gcsfuse
 
-go 1.21
+go 1.21.6
+
+toolchain go1.22.1
 
 require (
 	cloud.google.com/go/compute/metadata v0.2.3
@@ -57,6 +59,8 @@ require (
 	github.com/pkg/xattr v0.4.9 // indirect
 	github.com/prometheus/prometheus v0.35.0 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
+	github.com/syslab-wm/mu v0.2.0 // indirect
+	github.com/syslab-wm/nestedaes v0.0.0-20240327121328-1da8cc49a62f // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.48.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.48.0 // indirect
 	go.opentelemetry.io/otel v1.23.0 // indirect
