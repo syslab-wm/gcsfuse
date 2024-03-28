@@ -488,15 +488,22 @@ func (f *FileInode) SetMetaEntry(
 	ctx context.Context,
 	key string,
 	value string) (err error) {
+	return f.SetMetaEntries(ctx, map[string]*string{key: &value,})
+}
+
+// Set the entries for a given keys in the file's metadata. Always makes a round trip to GCS.
+//
+// LOCKS_REQUIRED(f.mu)
+func (f *FileInode) SetMetaEntries(
+	ctx context.Context,
+	entries map[string]*string) (err error) {
 	srcGen := f.SourceGeneration()
 
 	req := &gcs.UpdateObjectRequest{
 		Name:                       f.src.Name,
 		Generation:                 srcGen.Object,
 		MetaGenerationPrecondition: &srcGen.Metadata,
-		Metadata: map[string]*string{
-			key: &value,
-		},
+		Metadata:                   entries,
 	}
 
 	o, err := f.bucket.UpdateObject(ctx, req)

@@ -2356,6 +2356,8 @@ func (fs *fileSystem) WriteFile(
 
 	copy(buf[op.Offset % BlockSize:], op.Data)
 
+	entries := map[string]*string {}
+
 	for i := int64(0); i < sizeBlocks; i++ {
 		var header []byte
 		block := i + offsBlocks
@@ -2368,13 +2370,18 @@ func (fs *fileSystem) WriteFile(
 
 		// TODO: assemble all the metadata modifications here into a single request before sending them to google
 		// doing things like this is slow
-		err = in.SetMetaEntry(ctx, fmt.Sprintf("h%d", block), b64.URLEncoding.EncodeToString(header))
-		if err != nil {
-			return
-		}
+		b64_header := b64.URLEncoding.EncodeToString(header)
+		entries[fmt.Sprintf("h%d", block)] = &b64_header
 
 		fmt.Println("wrote: header", header, "block", block)
 	}
+
+	//fmt.Println("setmeta")
+	err = in.SetMetaEntries(ctx, entries)
+	if err != nil {
+		return
+	}
+	//fmt.Println("setmeta done")
 
 	err = in.Write(ctx, buf, offsBlocks * BlockSize)
 
