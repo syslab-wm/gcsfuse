@@ -2378,8 +2378,6 @@ func (fs *fileSystem) WriteFile(
 			return
 		}
 
-		// TODO: assemble all the metadata modifications here into a single request before sending them to google
-		// doing things like this is slow
 		b64_header := b64.URLEncoding.EncodeToString(header)
 		entries[fmt.Sprintf("h%d", block)] = &b64_header
 
