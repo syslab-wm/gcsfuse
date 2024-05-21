@@ -25,6 +25,7 @@ import (
 	"path"
 	"reflect"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -55,8 +56,9 @@ type ServerConfig struct {
 	// The bucket manager is responsible for setting up buckets.
 	BucketManager gcsx.BucketManager
 
-	// Experimental, do not use. Encrypts entire mount.
-	AESKey []byte
+	// Key encryption key. Set by ART goroutine.
+	KekMutex *sync.Mutex
+	Kek *[KeySize]byte
 
 	// The name of the specific GCS bucket to be mounted. If it's empty or "_",
 	// all accessible GCS buckets are mounted as subdirectories of the FS root.
@@ -173,7 +175,8 @@ func NewFileSystem(
 		mtimeClock:                 mtimeClock,
 		cacheClock:                 cfg.CacheClock,
 		bucketManager:              cfg.BucketManager,
-		aesKey:                     cfg.AESKey,
+		kek:                        cfg.Kek,
+		kekMutex:                   cfg.KekMutex,
 		localFileCache:             cfg.LocalFileCache,
 		contentCache:               contentCache,
 		implicitDirs:               cfg.ImplicitDirectories,
@@ -336,11 +339,13 @@ type fileSystem struct {
 	cacheClock    timeutil.Clock
 	bucketManager gcsx.BucketManager
 
+	kekMutex *sync.Mutex
+	kek *[KeySize]byte
+
 	/////////////////////////
 	// Constant data
 	/////////////////////////
 
-	aesKey []byte
 	localFileCache             bool
 	contentCache               *contentcache.ContentCache
 	implicitDirs               bool
@@ -2159,7 +2164,7 @@ func (fs *fileSystem) ReadFile(
 	defer fh.Unlock()
 
 	meta := fh.Inode().Source().Metadata
-	do_crypt := fs.aesKey != nil && meta["gcsfuse_crypt"] == "3"
+	do_crypt := fs.kekMutex != nil && meta["gcsfuse_crypt"] == "4"
 	if !do_crypt {
 		// Serve the read.
 		op.BytesRead, err = fh.Read(ctx, op.Dst, op.Offset, fs.sequentialReadSizeMb)
@@ -2197,21 +2202,25 @@ func (fs *fileSystem) ReadFile(
 
 	sizeBlocks = (int64(br) - 1) / BlockSize + 1
 
+	fs.kekMutex.Lock()
 	for i := int64(0); i < sizeBlocks; i++ {
 		var header []byte
 		block := i + offsBlocks
 
 		header, err = b64.URLEncoding.DecodeString(meta[fmt.Sprintf("h%d", block)])
 		if err != nil {
+			fs.kekMutex.Unlock()
 			return
 		}
 
 		// TODO: verify path, block ID, etc as addtional data
-		err = NestedOpen(fs.aesKey, header, buf[i * BlockSize:(i + 1) * BlockSize])
+		err = NestedOpen(fs.kek, header, buf[i * BlockSize:(i + 1) * BlockSize])
 		if err != nil {
+			fs.kekMutex.Unlock()
 			return
 		}
 	}
+	fs.kekMutex.Unlock()
 
 	op.BytesRead = copy(op.Dst, buf[op.Offset - offsBlocks * BlockSize:])
 
@@ -2250,7 +2259,7 @@ func (fs *fileSystem) WriteFile(
 
 	meta := in.Source().Metadata
 	// TODO: respect lack of this flag and set it on file creation instead
-	do_crypt := fs.aesKey != nil// && meta["gcsfuse_crypt"] == "2"
+	do_crypt := fs.kekMutex != nil// && meta["gcsfuse_crypt"] == "4"
 
 	if !do_crypt {
 		err = in.Write(ctx, op.Data, op.Offset)
@@ -2271,8 +2280,8 @@ func (fs *fileSystem) WriteFile(
 	buf := make([]byte, padSize)
 
 	// TODO: do this on file creation instead
-	if meta["gcsfuse_crypt"] != "3" {
-		err = in.SetMetaEntry(ctx, "gcsfuse_crypt", "3")
+	if meta["gcsfuse_crypt"] != "4" {
+		err = in.SetMetaEntry(ctx, "gcsfuse_crypt", "4")
 
 		if err != nil {
 			return
@@ -2284,6 +2293,7 @@ func (fs *fileSystem) WriteFile(
 		return
 	}
 
+	fs.kekMutex.Lock()
 	// Start offset is in the middle of a block and there's already data in it
 	if op.Offset % BlockSize != 0 && int64(attr.Size) > op.Offset {
 		var header []byte
@@ -2312,7 +2322,7 @@ func (fs *fileSystem) WriteFile(
 		}
 
 		// TODO: verify path, block ID, etc as addtional data
-		err = NestedOpen(fs.aesKey, header, buf[:BlockSize])
+		err = NestedOpen(fs.kek, header, buf[:BlockSize])
 		if err != nil {
 			return
 		}
@@ -2348,7 +2358,7 @@ func (fs *fileSystem) WriteFile(
 		}
 
 		// TODO: verify path, block ID, etc as addtional data
-		err = NestedOpen(fs.aesKey, header, buf[padSize - BlockSize:])
+		err = NestedOpen(fs.kek, header, buf[padSize - BlockSize:])
 		if err != nil {
 			return
 		}
@@ -2363,7 +2373,7 @@ func (fs *fileSystem) WriteFile(
 		block := i + offsBlocks
 
 		// TODO: verify path, block ID, etc as addtional data
-		header, err = NestedSeal(fs.aesKey, buf[i * BlockSize:(i + 1) * BlockSize])
+		header, err = NestedSeal(fs.kek, buf[i * BlockSize:(i + 1) * BlockSize])
 		if err != nil {
 			return
 		}
@@ -2375,6 +2385,7 @@ func (fs *fileSystem) WriteFile(
 
 		fmt.Println("wrote: header", header, "block", block)
 	}
+	fs.kekMutex.Unlock()
 
 	//fmt.Println("setmeta")
 	err = in.SetMetaEntries(ctx, entries)

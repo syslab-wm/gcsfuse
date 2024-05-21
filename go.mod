@@ -21,6 +21,7 @@ require (
 	github.com/jacobsa/syncutil v0.0.0-20180201203307-228ac8e5a6c3
 	github.com/jacobsa/timeutil v0.0.0-20170205232429-577e5acbbcf6
 	github.com/kardianos/osext v0.0.0-20190222173326-2bc1f35cddc0
+	github.com/syslab-wm/nestedaes v0.0.0-20240417185502-a0313ee9078b
 	github.com/urfave/cli v1.22.14
 	go.opencensus.io v0.24.0
 	golang.org/x/net v0.21.0
@@ -60,7 +61,6 @@ require (
 	github.com/prometheus/prometheus v0.35.0 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/syslab-wm/mu v0.2.0 // indirect
-	github.com/syslab-wm/nestedaes v0.0.0-20240327121328-1da8cc49a62f // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.48.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.48.0 // indirect
 	go.opentelemetry.io/otel v1.23.0 // indirect

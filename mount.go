@@ -17,12 +17,14 @@ package main
 import (
 	"fmt"
 	"os"
+	"sync"
 
 	"github.com/googlecloudplatform/gcsfuse/internal/config"
 	"github.com/googlecloudplatform/gcsfuse/internal/mount"
 	"github.com/googlecloudplatform/gcsfuse/internal/storage"
 	"golang.org/x/net/context"
 
+	"github.com/googlecloudplatform/gcsfuse/internal/art"
 	"github.com/googlecloudplatform/gcsfuse/internal/fs"
 	"github.com/googlecloudplatform/gcsfuse/internal/gcsx"
 	"github.com/googlecloudplatform/gcsfuse/internal/logger"
@@ -108,7 +110,8 @@ be interacting with the file system.`)
 	serverCfg := &fs.ServerConfig{
 		CacheClock:                 timeutil.RealClock(),
 		BucketManager:              bm,
-		AESKey:                     flags.AESKey,
+		KekMutex:                   nil,
+		Kek:                        new([fs.KeySize]byte),
 		BucketName:                 bucketName,
 		LocalFileCache:             flags.LocalFileCache,
 		DebugFS:                    flags.DebugFS,
@@ -126,7 +129,14 @@ be interacting with the file system.`)
 		MountConfig:                mountConfig,
 	}
 
-	logger.Infof("Creating a new server...\n")
+	if flags.KekFile != "" {
+		serverCfg.KekMutex = &sync.Mutex{}
+
+		logger.Info("Starting ART thread...\n")
+		go art.ArtMainLoop(serverCfg.Kek, serverCfg.KekMutex, flags.KekFile)
+	}
+
+	logger.Info("Creating a new server...\n")
 	server, err := fs.NewServer(ctx, serverCfg)
 	if err != nil {
 		err = fmt.Errorf("fs.NewServer: %w", err)

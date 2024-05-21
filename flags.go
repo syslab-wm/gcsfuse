@@ -21,7 +21,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"encoding/hex"
 
 	"github.com/googlecloudplatform/gcsfuse/internal/config"
 	"github.com/googlecloudplatform/gcsfuse/internal/logger"
@@ -74,9 +73,10 @@ func newApp() (app *cli.App) {
 		Writer:  os.Stderr,
 		Flags: []cli.Flag{
 			cli.StringFlag{
-				Name:  "aes-key",
+				Name:  "kek-file",
 				Value: "",
-				Usage: "Experimental, do not use. AES-128 key in hex for encrypting entire mount.",
+				Usage: "The path to the file in which to store the key encryption key for ART. Experimental and must already " +
+					"exist. If not passed, client-side mount encryption will not be used. Unrelated to key-file option.",
 			},
 
 			cli.StringFlag{
@@ -366,7 +366,7 @@ type flagStorage struct {
 	Foreground bool
 	ConfigFile string
 
-	AESKey []byte
+	KekFile string
 
 	// File system
 	MountOptions   map[string]string
@@ -498,35 +498,15 @@ func populateFlags(c *cli.Context) (flags *flagStorage, err error) {
 		}
 	}
 
-	aesKeyStr := c.String("aes-key")
-	var aesKey []byte
-
-	if aesKeyStr == "" {
-		aesKey = nil
-	} else {
-		aesKey, err = hex.DecodeString(aesKeyStr)
-		if err != nil {
-			err = fmt.Errorf("could not parse aes-key: %w", err)
-			return
-		}
-		if len(aesKey) != 32 {
-			err = fmt.Errorf("wrong length for aes-key: %d != 32", len(aesKey))
-			return
-		}
-	}
-
 	clientProtocolString := strings.ToLower(c.String("client-protocol"))
 	clientProtocol := mountpkg.ClientProtocol(clientProtocolString)
-	fmt.Println(c.String("aes-key"))
-	fmt.Println(len(c.String("aes-key")))
-	fmt.Println(aesKey)
-	fmt.Println(len(aesKey))
+
 	flags = &flagStorage{
 		AppName:    c.String("app-name"),
 		Foreground: c.Bool("foreground"),
 		ConfigFile: c.String("config-file"),
 
-		AESKey: aesKey,
+		KekFile: c.String("kek-file"),
 
 		// File system
 		MountOptions:   make(map[string]string),

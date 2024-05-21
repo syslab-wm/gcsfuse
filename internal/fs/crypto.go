@@ -1,26 +1,31 @@
 package fs
 
 import (
+	"fmt"
 	//"crypto/aes"
 	//"crypto/cipher"
 	"crypto/rand"
 
 	"github.com/syslab-wm/nestedaes"
-	//"github.com/syslab-wm/nestedaes/internal/aesx"
 )
 
 const BlockSize = 64 * 1024
+//const KeySize = nestedaes.KeySize
+const KeySize = 32
+
 
 // TODO: add additionaldata to nestedaes
 func NestedSeal(
-	key []byte,
+	key *[KeySize]byte,
 	buf []byte) (header []byte, err error) {
 
 	// TODO: don't hardcode iv size
 	nonce := make([]byte, 16)
 	rand.Read(nonce)
 
-	cipherText, err := nestedaes.Encrypt(buf, key, nonce)
+	//fmt.Printf("enc w/ k %d %x nonce %d %x\n", len(key), *key, len(nonce), nonce)
+	cipherText, err := nestedaes.Encrypt(buf, key[:], nonce, nil)
+	println("done")
 	if err != nil {
 		return
 	}
@@ -40,7 +45,7 @@ func NestedSeal(
 }
 
 func NestedOpen(
-	key []byte,
+	key *[KeySize]byte,
 	header []byte,
 	buf []byte) (err error) {
 
@@ -48,7 +53,9 @@ func NestedOpen(
 	copy(workBuf, header)
 	copy(workBuf[len(header):], buf)
 
-	plainText, err := nestedaes.Decrypt(workBuf, key)
+	fmt.Printf("enc w/ k %d %x\n", len(key), *key)
+	plainText, err := nestedaes.Decrypt(workBuf, key[:], nil)
+	println("done")
 	if err != nil {
 		return
 	}
