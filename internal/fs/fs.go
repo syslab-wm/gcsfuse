@@ -15,7 +15,6 @@
 package fs
 
 import (
-	b64 "encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -25,7 +24,6 @@ import (
 	"path"
 	"reflect"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -55,10 +53,6 @@ type ServerConfig struct {
 
 	// The bucket manager is responsible for setting up buckets.
 	BucketManager gcsx.BucketManager
-
-	// Key encryption key. Set by ART goroutine.
-	KekMutex *sync.Mutex
-	Kek *[KeySize]byte
 
 	// The name of the specific GCS bucket to be mounted. If it's empty or "_",
 	// all accessible GCS buckets are mounted as subdirectories of the FS root.
@@ -175,8 +169,6 @@ func NewFileSystem(
 		mtimeClock:                 mtimeClock,
 		cacheClock:                 cfg.CacheClock,
 		bucketManager:              cfg.BucketManager,
-		kek:                        cfg.Kek,
-		kekMutex:                   cfg.KekMutex,
 		localFileCache:             cfg.LocalFileCache,
 		contentCache:               contentCache,
 		implicitDirs:               cfg.ImplicitDirectories,
@@ -338,9 +330,6 @@ type fileSystem struct {
 	mtimeClock    timeutil.Clock
 	cacheClock    timeutil.Clock
 	bucketManager gcsx.BucketManager
-
-	kekMutex *sync.Mutex
-	kek *[KeySize]byte
 
 	/////////////////////////
 	// Constant data
@@ -2145,8 +2134,6 @@ func (fs *fileSystem) OpenFile(
 	return
 }
 
-// BIG TODO: figure out the best way to solve padding. right now this code creates a bunch of junk 0s in the plaintext which is bad
-
 // LOCKS_EXCLUDED(fs.mu)
 func (fs *fileSystem) ReadFile(
 	ctx context.Context,
@@ -2163,66 +2150,13 @@ func (fs *fileSystem) ReadFile(
 	fh.Lock()
 	defer fh.Unlock()
 
-	meta := fh.Inode().Source().Metadata
-	do_crypt := fs.kekMutex != nil && meta["gcsfuse_crypt"] == "4"
-	if !do_crypt {
-		// Serve the read.
-		op.BytesRead, err = fh.Read(ctx, op.Dst, op.Offset, fs.sequentialReadSizeMb)
+	// Serve the read.
+	op.BytesRead, err = fh.Read(ctx, op.Dst, op.Offset, fs.sequentialReadSizeMb)
 
-		// As required by fuse, we don't treat EOF as an error.
-		if err == io.EOF {
-			err = nil
-		}
-
-		return
-	}
-
-	offsBlocks := op.Offset / BlockSize
-	startPadSize := int64(len(op.Dst)) + (op.Offset % BlockSize)
-	sizeBlocks := (startPadSize - 1) / BlockSize + 1
-	padSize := sizeBlocks * BlockSize
-
-	fmt.Printf("I am cipher code read inode %d offset 0x%X size 0x%X offsBlocks 0x%X sizeBlocks 0x%X\n", op.Inode, op.Offset, len(op.Dst), offsBlocks, sizeBlocks);
-
-	/*attr, err := fh.Inode().Attributes(ctx)
-	if err != nil {
-		return
-	}*/
-
-	buf := make([]byte, padSize)
-	br, err := fh.Read(ctx, buf, offsBlocks * BlockSize, fs.sequentialReadSizeMb)
-
+	// As required by fuse, we don't treat EOF as an error.
 	if err == io.EOF {
 		err = nil
 	}
-
-	if err != nil {
-		return
-	}
-
-	sizeBlocks = (int64(br) - 1) / BlockSize + 1
-
-	fs.kekMutex.Lock()
-	for i := int64(0); i < sizeBlocks; i++ {
-		var header []byte
-		block := i + offsBlocks
-
-		header, err = b64.URLEncoding.DecodeString(meta[fmt.Sprintf("h%d", block)])
-		if err != nil {
-			fs.kekMutex.Unlock()
-			return
-		}
-
-		// TODO: verify path, block ID, etc as addtional data
-		err = NestedOpen(fs.kek, header, buf[i * BlockSize:(i + 1) * BlockSize])
-		if err != nil {
-			fs.kekMutex.Unlock()
-			return
-		}
-	}
-	fs.kekMutex.Unlock()
-
-	op.BytesRead = copy(op.Dst, buf[op.Offset - offsBlocks * BlockSize:])
 
 	return
 }
@@ -2257,142 +2191,10 @@ func (fs *fileSystem) WriteFile(
 	in.Lock()
 	defer in.Unlock()
 
-	meta := in.Source().Metadata
-	// TODO: respect lack of this flag and set it on file creation instead
-	do_crypt := fs.kekMutex != nil// && meta["gcsfuse_crypt"] == "4"
-
-	if !do_crypt {
-		err = in.Write(ctx, op.Data, op.Offset)
-
-		return
+	// Serve the request.
+	if err := in.Write(ctx, op.Data, op.Offset); err != nil {
+		return err
 	}
-
-	offsBlocks := op.Offset / BlockSize
-	startPadSize := int64(len(op.Data)) + (op.Offset % BlockSize)
-	sizeBlocks := (startPadSize - 1) / BlockSize + 1
-	padSize := sizeBlocks * BlockSize
-	//writeEnd := uint64(op.Offset) + uint64(len(op.Data))
-
-	fmt.Printf("I am cipher code write inode %d offset 0x%X size 0x%X offsBlocks 0x%X sizeBlocks 0x%X\n", op.Inode, op.Offset, len(op.Data), offsBlocks, sizeBlocks);
-
-	// TODO: a lot of the following is duplicated from read code and should be consolidated
-
-	buf := make([]byte, padSize)
-
-	// TODO: do this on file creation instead
-	if meta["gcsfuse_crypt"] != "4" {
-		err = in.SetMetaEntry(ctx, "gcsfuse_crypt", "4")
-
-		if err != nil {
-			return
-		}
-	}
-
-	attr, err := in.Attributes(ctx)
-	if err != nil {
-		return
-	}
-
-	fs.kekMutex.Lock()
-	// Start offset is in the middle of a block and there's already data in it
-	if op.Offset % BlockSize != 0 && int64(attr.Size) > op.Offset {
-		var header []byte
-
-		header, err = b64.URLEncoding.DecodeString(meta[fmt.Sprintf("h%d", offsBlocks)])
-		if err != nil {
-			return
-		}
-
-		fmt.Println("writeread: header", header, "block", offsBlocks)
-
-		var br int
-		br, err = in.Read(ctx, buf[:BlockSize], offsBlocks * BlockSize)
-
-		if br != BlockSize {
-			// TODO: find better way to fail here or rework thing to not pad the file
-			panic("file size wasn't block multiple")
-		}
-
-		if err == io.EOF {
-			err = nil
-		}
-
-		if err != nil {
-			return
-		}
-
-		// TODO: verify path, block ID, etc as addtional data
-		err = NestedOpen(fs.kek, header, buf[:BlockSize])
-		if err != nil {
-			return
-		}
-	}
-
-	// End offset in the middle of a block, there's already data in it, and we didn't just read this same block in the above code
-	if startPadSize % BlockSize != 0 && int64(attr.Size) > (offsBlocks * BlockSize) + startPadSize &&
-		!(sizeBlocks == 1 && op.Offset % BlockSize != 0) {
-		var header []byte
-		lastBlock := offsBlocks + sizeBlocks - 1
-
-		header, err = b64.URLEncoding.DecodeString(meta[fmt.Sprintf("h%d", offsBlocks)])
-		if err != nil {
-			return
-		}
-
-		fmt.Println("writeread: header", header, "block", offsBlocks)
-
-		var br int
-		br, err = in.Read(ctx, buf[padSize - BlockSize:], lastBlock * BlockSize)
-
-		if br != BlockSize {
-			// TODO: find better way to fail here or rework thing to not pad the file
-			panic("file size wasn't block multiple")
-		}
-
-		if err == io.EOF {
-			err = nil
-		}
-
-		if err != nil {
-			return
-		}
-
-		// TODO: verify path, block ID, etc as addtional data
-		err = NestedOpen(fs.kek, header, buf[padSize - BlockSize:])
-		if err != nil {
-			return
-		}
-	}
-
-	copy(buf[op.Offset % BlockSize:], op.Data)
-
-	entries := map[string]*string {}
-
-	for i := int64(0); i < sizeBlocks; i++ {
-		var header []byte
-		block := i + offsBlocks
-
-		// TODO: verify path, block ID, etc as addtional data
-		header, err = NestedSeal(fs.kek, buf[i * BlockSize:(i + 1) * BlockSize])
-		if err != nil {
-			return
-		}
-
-		b64_header := b64.URLEncoding.EncodeToString(header)
-		entries[fmt.Sprintf("h%d", block)] = &b64_header
-
-		fmt.Println("wrote: header", header, "block", block)
-	}
-	fs.kekMutex.Unlock()
-
-	//fmt.Println("setmeta")
-	err = in.SetMetaEntries(ctx, entries)
-	if err != nil {
-		return
-	}
-	//fmt.Println("setmeta done")
-
-	err = in.Write(ctx, buf, offsBlocks * BlockSize)
 
 	return
 }
