@@ -68,11 +68,15 @@ func (bh *bucketHandle) NewReader(
 		obj = obj.ReadCompressed(true)
 	}
 
+	fmt.Printf("newreader for %s offset 0x%X len 0x%X\n", req.Name, start, length);
+
 	// NewRangeReader creates a "storage.Reader" object which is also io.ReadCloser since it contains both Read() and Close() methods present in io.ReadCloser interface.
 	return obj.NewRangeReader(ctx, start, length)
 }
 func (b *bucketHandle) DeleteObject(ctx context.Context, req *gcs.DeleteObjectRequest) error {
 	obj := b.bucket.Object(req.Name)
+
+	fmt.Printf("DeleteObject %s\n", req.Name);
 
 	// Switching to the requested generation of the object. By default, generation
 	// is 0 which signifies the latest generation. Note: GCS will delete the
@@ -134,6 +138,8 @@ func (b *bucketHandle) StatObject(ctx context.Context,
 
 func (bh *bucketHandle) CreateObject(ctx context.Context, req *gcs.CreateObjectRequest) (o *gcs.Object, err error) {
 	obj := bh.bucket.Object(req.Name)
+
+	fmt.Printf("CreateObject %s\n", req.Name);
 
 	// GenerationPrecondition - If non-nil, the object will be created/overwritten
 	// only if the current generation for the object name is equal to the given value.

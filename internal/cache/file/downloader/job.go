@@ -16,6 +16,7 @@ package downloader
 
 import (
 	"container/list"
+	b64 "encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -23,6 +24,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/googlecloudplatform/gcsfuse/internal/art"
 	"github.com/googlecloudplatform/gcsfuse/internal/cache/data"
 	"github.com/googlecloudplatform/gcsfuse/internal/cache/lru"
 	cacheutil "github.com/googlecloudplatform/gcsfuse/internal/cache/util"
@@ -45,6 +47,7 @@ const (
 )
 
 const ReadChunkSize = 8 * cacheutil.MiB
+const BlockSize = 64 * 1024 // for crypto
 
 // Job downloads the requested object from GCS into the specified local file
 // path with given permissions and ownership.
@@ -102,7 +105,8 @@ type jobSubscriber struct {
 }
 
 func NewJob(object *gcs.MinObject, bucket gcs.Bucket, fileInfoCache *lru.Cache,
-	sequentialReadSizeMb int32, fileSpec data.FileSpec, removeJobCallback func()) (job *Job) {
+	sequentialReadSizeMb int32, fileSpec data.FileSpec,
+	removeJobCallback func()) (job *Job) {
 	job = &Job{
 		object:               object,
 		bucket:               bucket,
@@ -264,6 +268,8 @@ func (job *Job) updateFileInfoCache() (err error) {
 // Note: There can only be one async download running for a job at a time.
 // Acquires and releases LOCK(job.mu)
 func (job *Job) downloadObjectAsync() {
+	fmt.Printf("downloadObjectAsync %s\n", job.object.Name);
+
 	// Close the job.doneCh, clear the cancelFunc & cancelCtx and call the
 	// remove job callback function in any case - completion/failure.
 	defer func() {
@@ -311,88 +317,160 @@ func (job *Job) downloadObjectAsync() {
 		case <-job.cancelCtx.Done():
 			return
 		default:
-			if start < end {
-				if newReader == nil {
-					newReaderLimit = min(start+sequentialReadSize, end)
-					newReader, err = job.bucket.NewReader(
-						job.cancelCtx,
-						&gcs.ReadObjectRequest{
-							Name:       job.object.Name,
-							Generation: job.object.Generation,
-							Range: &gcs.ByteRange{
-								Start: uint64(start),
-								Limit: uint64(newReaderLimit),
-							},
-							ReadCompressed: job.object.HasContentEncodingGzip(),
-						})
-					if err != nil {
-						// Context is canceled when job.cancel is called at the time of
-						// invalidation and hence caller should be notified as invalid.
-						if errors.Is(err, context.Canceled) {
-							notifyInvalid()
-							return
-						}
-						err = fmt.Errorf("downloadObjectAsync: error in creating NewReader with start %d and limit %d: %w", start, newReaderLimit, err)
-						job.failWhileDownloading(err)
-						return
-					}
-					monitor.CaptureGCSReadMetrics(job.cancelCtx, util.Sequential, newReaderLimit-start)
-				}
-
-				maxRead := min(ReadChunkSize, newReaderLimit-start)
-				_, err = cacheFile.Seek(start, 0)
-				if err != nil {
-					err = fmt.Errorf("downloadObjectAsync: error while seeking file handle, seek %d: %w", start, err)
-					job.failWhileDownloading(err)
-					return
-				}
-
-				// Copy the contents from NewReader to cache file.
-				_, readErr := io.CopyN(cacheFile, newReader, maxRead)
-				if readErr != nil {
-					// Context is canceled when job.cancel is called at the time of
-					// invalidation and hence caller should be notified as invalid.
-					if errors.Is(readErr, context.Canceled) {
-						notifyInvalid()
-						return
-					}
-					err = fmt.Errorf("downloadObjectAsync: error at the time of copying content to cache file %w", readErr)
-					job.failWhileDownloading(err)
-					return
-				}
-				start += maxRead
-				if start == newReaderLimit {
-					newReader = nil
-				}
-
-				job.mu.Lock()
-				job.status.Offset = start
-				err = job.updateFileInfoCache()
-				// Notify subscribers if file cache is updated.
-				if err == nil {
-					job.notifySubscribers()
-				} else if strings.Contains(err.Error(), lru.EntryNotExistErrMsg) {
-					// Download job expects entry in file info cache for the file it is
-					// downloading. If the entry is deleted in between which is expected
-					// to happen at the time of eviction, then the job should be
-					// marked Invalid instead of Failed.
-					job.status.Name = Invalid
-					job.notifySubscribers()
-					logger.Tracef("Job:%p (%s:/%s) is no longer valid due to absense of entry in file info cache.", job, job.bucket.Name(), job.object.Name)
-					job.mu.Unlock()
-					return
-				}
-				job.mu.Unlock()
-				// Change status of job in case of error while updating file cache.
-				if err != nil {
-					job.failWhileDownloading(err)
-					return
-				}
-			} else {
+			if start >= end {
 				job.mu.Lock()
 				job.status.Name = Completed
 				job.notifySubscribers()
 				job.mu.Unlock()
+				return
+			}
+
+			if newReader == nil {
+				newReaderLimit = min(start+sequentialReadSize, end)
+				newReader, err = job.bucket.NewReader(
+					job.cancelCtx,
+					&gcs.ReadObjectRequest{
+						Name:       job.object.Name,
+						Generation: job.object.Generation,
+						Range: &gcs.ByteRange{
+							Start: uint64(start),
+							Limit: uint64(newReaderLimit),
+						},
+						ReadCompressed: job.object.HasContentEncodingGzip(),
+					})
+				if err != nil {
+					// Context is canceled when job.cancel is called at the time of
+					// invalidation and hence caller should be notified as invalid.
+					if errors.Is(err, context.Canceled) {
+						notifyInvalid()
+						return
+					}
+					err = fmt.Errorf("downloadObjectAsync: error in creating NewReader with start %d and limit %d: %w", start, newReaderLimit, err)
+					job.failWhileDownloading(err)
+					return
+				}
+				monitor.CaptureGCSReadMetrics(job.cancelCtx, util.Sequential, newReaderLimit-start)
+			}
+
+			maxRead := min(ReadChunkSize, newReaderLimit-start)
+			fmt.Printf("NEWLOG downloadObjectAsync loop %d size %d\n", start, maxRead)
+			_, err = cacheFile.Seek(start, 0)
+			if err != nil {
+				err = fmt.Errorf("downloadObjectAsync: error while seeking file handle, seek %d: %w", start, err)
+				job.failWhileDownloading(err)
+				return
+			}
+
+			// Copy the contents from NewReader to cache file.
+			var readErr error
+			meta := job.object.Metadata
+			// TODO: as default, refuse to read if crypt flag set wrong
+			if art.KekMutex == nil || meta["gcsfuse_crypt"] != "4" {
+				fmt.Printf("NO,PE %s\n", meta["gcsfuse_crypt"]);
+				_, readErr = io.CopyN(cacheFile, newReader, maxRead)
+			} else {
+				if start % BlockSize != 0 {
+					err = fmt.Errorf("downloadObjectAsync: misaligned start offset %d", start)
+					job.failWhileDownloading(err)
+					return
+				}
+
+				// TODO: partial last block
+				if maxRead % BlockSize != 0 {
+					err = fmt.Errorf("downloadObjectAsync: bad size %d does not fit into %d byte chunks TODO", maxRead, BlockSize)
+					job.failWhileDownloading(err)
+					return
+				}
+
+				startBlocks := start / BlockSize
+				endBlocks := end / BlockSize
+				sizeBlocks := endBlocks - startBlocks
+				if sizeBlocks != maxRead / BlockSize {
+					panic("math ain't mathin chief")
+				}
+
+				fmt.Printf("readcrypto %d to %d siz %d\n", startBlocks, endBlocks, sizeBlocks)
+
+				buf := make([]byte, BlockSize)
+				var kek [KeySize]byte
+				art.KekMutex.Lock()
+				copy(kek[:], art.Kek[:])
+				art.KekMutex.Unlock()
+				for i := startBlocks; i < endBlocks; i++ {
+					fmt.Printf("LOOP with %d\n", i)
+					header, err := b64.URLEncoding.DecodeString(meta[fmt.Sprintf("h%d", i)])
+					if err != nil {
+						// TODO err = fmt.Errorf()
+						println(err)
+						job.failWhileDownloading(err)
+						return
+					}
+
+					_, err = newReader.Read(buf) // TODO err from here
+					if err != nil {
+						// TODO err =
+						fmt.Printf("net read %v\n", err)
+						job.failWhileDownloading(err)
+						return
+					}
+
+					err = NestedOpen((*[32]byte)(kek[:]), header, buf)
+					if err != nil {
+						// TODO err =
+						fmt.Printf("open %v\n", err)
+						job.failWhileDownloading(err)
+						return
+					}
+
+					_, err = cacheFile.Write(buf)
+					if err != nil {
+						//TODO
+						fmt.Printf("filewrite %v\n", err)
+						job.failWhileDownloading(err);
+						return;
+					}
+					println("actually got here")
+				}
+			}
+
+
+			if readErr != nil {
+				// Context is canceled when job.cancel is called at the time of
+				// invalidation and hence caller should be notified as invalid.
+				if errors.Is(readErr, context.Canceled) {
+					notifyInvalid()
+					return
+				}
+				err = fmt.Errorf("downloadObjectAsync: error at the time of copying content to cache file %w", readErr)
+				job.failWhileDownloading(err)
+				return
+			}
+			start += maxRead
+			if start == newReaderLimit {
+				newReader = nil
+			}
+
+			job.mu.Lock()
+			job.status.Offset = start
+			err = job.updateFileInfoCache()
+			// Notify subscribers if file cache is updated.
+			if err == nil {
+				job.notifySubscribers()
+			} else if strings.Contains(err.Error(), lru.EntryNotExistErrMsg) {
+				// Download job expects entry in file info cache for the file it is
+				// downloading. If the entry is deleted in between which is expected
+				// to happen at the time of eviction, then the job should be
+				// marked Invalid instead of Failed.
+				job.status.Name = Invalid
+				job.notifySubscribers()
+				logger.Tracef("Job:%p (%s:/%s) is no longer valid due to absense of entry in file info cache.", job, job.bucket.Name(), job.object.Name)
+				job.mu.Unlock()
+				return
+			}
+			job.mu.Unlock()
+			// Change status of job in case of error while updating file cache.
+			if err != nil {
+				job.failWhileDownloading(err)
 				return
 			}
 		}
@@ -406,6 +484,8 @@ func (job *Job) downloadObjectAsync() {
 //
 // Acquires and releases LOCK(job.mu)
 func (job *Job) Download(ctx context.Context, offset int64, waitForDownload bool) (jobStatus JobStatus, err error) {
+	fmt.Printf("Download %s offset %d\n", job.object.Name, offset);
+
 	job.mu.Lock()
 	if int64(job.object.Size) < offset {
 		defer job.mu.Unlock()

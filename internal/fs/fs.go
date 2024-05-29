@@ -24,6 +24,7 @@ import (
 	"path"
 	"reflect"
 	"strings"
+	//"sync"
 	"syscall"
 	"time"
 
@@ -53,6 +54,9 @@ type ServerConfig struct {
 
 	// The bucket manager is responsible for setting up buckets.
 	BucketManager gcsx.BucketManager
+
+	//KekMutex *sync.Mutex
+	//Kek *[KeySize]byte
 
 	// The name of the specific GCS bucket to be mounted. If it's empty or "_",
 	// all accessible GCS buckets are mounted as subdirectories of the FS root.
@@ -2158,6 +2162,8 @@ func (fs *fileSystem) ReadFile(
 		err = nil
 	}
 
+	fmt.Printf("I am top call read inode %d offset 0x%X size 0x%X realsize 0x%X\n", op.Inode, op.Offset, len(op.Dst), op.BytesRead);
+
 	return
 }
 
@@ -2190,6 +2196,8 @@ func (fs *fileSystem) WriteFile(
 
 	in.Lock()
 	defer in.Unlock()
+
+	fmt.Printf("I am top call write inode %d offset 0x%X size 0x%X\n", op.Inode, op.Offset, len(op.Data))
 
 	// Serve the request.
 	if err := in.Write(ctx, op.Data, op.Offset); err != nil {

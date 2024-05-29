@@ -139,6 +139,8 @@ func (fch *CacheHandle) validateEntryInFileInfoCache(bucket gcs.Bucket, object *
 // download. Additionally, for random reads, the download will not be
 // initiated if fch.cacheFileForRangeRead is false.
 func (fch *CacheHandle) Read(ctx context.Context, bucket gcs.Bucket, object *gcs.MinObject, offset int64, dst []byte) (n int, cacheHit bool, err error) {
+	fmt.Printf("CacheHandle Read called for %s offset %d size %d\n", fch.fileHandle.Name(), offset, len(dst));
+
 	err = fch.validateCacheHandle()
 	if err != nil {
 		return
@@ -208,6 +210,7 @@ func (fch *CacheHandle) Read(ctx context.Context, bucket gcs.Bucket, object *gcs
 	}
 
 	// We are here means, we have the data downloaded which kernel has asked for.
+	println("got here")
 	n, err = fch.fileHandle.ReadAt(dst, offset)
 	requestedNumBytes := int(requiredOffset - offset)
 	// dst buffer has fixed size of 1 MiB even when the offset is such that

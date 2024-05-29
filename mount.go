@@ -19,6 +19,7 @@ import (
 	"os"
 	"sync"
 
+	//"github.com/googlecloudplatform/gcsfuse/internal/cache/file/downloader"
 	"github.com/googlecloudplatform/gcsfuse/internal/config"
 	"github.com/googlecloudplatform/gcsfuse/internal/mount"
 	"github.com/googlecloudplatform/gcsfuse/internal/storage"
@@ -110,8 +111,8 @@ be interacting with the file system.`)
 	serverCfg := &fs.ServerConfig{
 		CacheClock:                 timeutil.RealClock(),
 		BucketManager:              bm,
-		KekMutex:                   nil,
-		Kek:                        new([fs.KeySize]byte),
+		//KekMutex:                   nil,
+		//Kek:                        new([downloader.KeySize]byte),
 		BucketName:                 bucketName,
 		LocalFileCache:             flags.LocalFileCache,
 		DebugFS:                    flags.DebugFS,
@@ -130,10 +131,10 @@ be interacting with the file system.`)
 	}
 
 	if flags.KekFile != "" {
-		serverCfg.KekMutex = &sync.Mutex{}
-
 		logger.Info("Starting ART thread...\n")
-		go art.ArtMainLoop(serverCfg.Kek, serverCfg.KekMutex, flags.KekFile)
+		art.KekMutex = &sync.Mutex{}
+		//copy(art.Kek[:], serverCfg.Kek)
+		go art.ArtMainLoop(flags.KekFile)
 	}
 
 	logger.Info("Creating a new server...\n")
