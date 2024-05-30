@@ -406,18 +406,19 @@ func (job *Job) downloadObjectAsync() {
 						return
 					}
 
-					_, err = newReader.Read(buf) // TODO err from here
+					// TODO: readErr thing
+					_, err = io.ReadFull(newReader, buf)
 					if err != nil {
 						// TODO err =
 						fmt.Printf("net read %v\n", err)
 						job.failWhileDownloading(err)
 						return
 					}
+					//fmt.Printf("read %d\n%x %x \n\n%x\n\n%d %d\n", i, kek, header, buf, len(header), len(buf))
 
-					err = NestedOpen((*[32]byte)(kek[:]), header, buf)
+					err = NestedOpen(&kek, header, buf)
 					if err != nil {
 						// TODO err =
-						fmt.Printf("open %v\n", err)
 						job.failWhileDownloading(err)
 						return
 					}
