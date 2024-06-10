@@ -46,8 +46,8 @@ const (
 	Invalid     jobStatusName = "Invalid"
 )
 
-const ReadChunkSize = 8 * cacheutil.MiB
-const BlockSize = 64 * 1024 // for crypto
+const CryptoChunkSize = 64 * cacheutil.MiB
+const ReadChunkSize = CryptoChunkSize //8 * cacheutil.MiB
 
 // Job downloads the requested object from GCS into the specified local file
 // path with given permissions and ownership.
@@ -285,6 +285,19 @@ func (job *Job) downloadObjectAsync() {
 		job.mu.Unlock()
 	}()
 
+	if art.KekMutex == nil {
+		err := fmt.Errorf("downloadObjectAsync: no KekMutex set, failing");
+		job.failWhileDownloading(err)
+		return
+	}
+
+	meta := job.object.Metadata
+	if meta["gcsfuse_crypt"] != "6" {
+		err := fmt.Errorf("downloadObjectAsync: wrong crypt scheme version: %s", meta["gcsfuse_crypt"]);
+		job.failWhileDownloading(err)
+		return
+	}
+
 	// Create, open and truncate cache file for writing object into it.
 	cacheFile, err := cacheutil.CreateFile(job.fileSpec, os.O_TRUNC|os.O_WRONLY)
 	if err != nil {
@@ -361,77 +374,67 @@ func (job *Job) downloadObjectAsync() {
 				return
 			}
 
-			// Copy the contents from NewReader to cache file.
+			// Copy the contents from NewReader to cache file, decrypting as we go
 			var readErr error
-			meta := job.object.Metadata
-			// TODO: as default, refuse to read if crypt flag set wrong
-			if art.KekMutex == nil || meta["gcsfuse_crypt"] != "4" {
-				fmt.Printf("NO,PE %s\n", meta["gcsfuse_crypt"]);
-				_, readErr = io.CopyN(cacheFile, newReader, maxRead)
-			} else {
-				if start % BlockSize != 0 {
-					err = fmt.Errorf("downloadObjectAsync: misaligned start offset %d", start)
+			if start % CryptoChunkSize != 0 {
+				err = fmt.Errorf("downloadObjectAsync: misaligned start offset %d", start)
+				job.failWhileDownloading(err)
+				return
+			}
+
+			startBlocks := start / CryptoChunkSize
+			endBlocks := (maxRead - 1) / CryptoChunkSize + 1
+			sizeBlocks := endBlocks - startBlocks
+
+			fmt.Printf("readcrypto %d to %d siz %d\n", startBlocks, endBlocks, sizeBlocks)
+
+			buf := make([]byte, CryptoChunkSize)
+			var kek [KeySize]byte
+			art.KekMutex.Lock()
+			copy(kek[:], art.Kek[:])
+			art.KekMutex.Unlock()
+			for i := startBlocks; i < endBlocks; i++ {
+				misalign := CryptoChunkSize
+				if i == endBlocks - 1 && maxRead == end {
+					misalign = int(end % CryptoChunkSize)
+					if misalign == 0 {
+						misalign = CryptoChunkSize
+					}
+				}
+
+				header, err := b64.URLEncoding.DecodeString(meta[fmt.Sprintf("h%d", i)])
+				if err != nil {
+					// TODO err = fmt.Errorf()
+					println(err)
 					job.failWhileDownloading(err)
 					return
 				}
 
-				// TODO: partial last block
-				if maxRead % BlockSize != 0 {
-					err = fmt.Errorf("downloadObjectAsync: bad size %d does not fit into %d byte chunks TODO", maxRead, BlockSize)
+				// TODO: readErr thing
+				_, err = io.ReadFull(newReader, buf[:misalign])
+				if err != nil {
+					// TODO err =
+					fmt.Printf("net read %v\n", err)
+					job.failWhileDownloading(err)
+					return
+				}
+				//fmt.Printf("read %d\n%x %x \n\n%x\n\n%d %d\n", i, kek, header, buf, len(header), len(buf))
+
+				err = NestedOpen(&kek, header, buf[:misalign])
+				if err != nil {
+					// TODO err =
 					job.failWhileDownloading(err)
 					return
 				}
 
-				startBlocks := start / BlockSize
-				endBlocks := end / BlockSize
-				sizeBlocks := endBlocks - startBlocks
-				if sizeBlocks != maxRead / BlockSize {
-					panic("math ain't mathin chief")
+				_, err = cacheFile.Write(buf[:misalign])
+				if err != nil {
+					//TODO
+					fmt.Printf("filewrite %v\n", err)
+					job.failWhileDownloading(err);
+					return;
 				}
-
-				fmt.Printf("readcrypto %d to %d siz %d\n", startBlocks, endBlocks, sizeBlocks)
-
-				buf := make([]byte, BlockSize)
-				var kek [KeySize]byte
-				art.KekMutex.Lock()
-				copy(kek[:], art.Kek[:])
-				art.KekMutex.Unlock()
-				for i := startBlocks; i < endBlocks; i++ {
-					fmt.Printf("LOOP with %d\n", i)
-					header, err := b64.URLEncoding.DecodeString(meta[fmt.Sprintf("h%d", i)])
-					if err != nil {
-						// TODO err = fmt.Errorf()
-						println(err)
-						job.failWhileDownloading(err)
-						return
-					}
-
-					// TODO: readErr thing
-					_, err = io.ReadFull(newReader, buf)
-					if err != nil {
-						// TODO err =
-						fmt.Printf("net read %v\n", err)
-						job.failWhileDownloading(err)
-						return
-					}
-					//fmt.Printf("read %d\n%x %x \n\n%x\n\n%d %d\n", i, kek, header, buf, len(header), len(buf))
-
-					err = NestedOpen(&kek, header, buf)
-					if err != nil {
-						// TODO err =
-						job.failWhileDownloading(err)
-						return
-					}
-
-					_, err = cacheFile.Write(buf)
-					if err != nil {
-						//TODO
-						fmt.Printf("filewrite %v\n", err)
-						job.failWhileDownloading(err);
-						return;
-					}
-					println("actually got here")
-				}
+				println("actually got here")
 			}
 
 

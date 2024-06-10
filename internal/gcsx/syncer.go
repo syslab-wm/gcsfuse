@@ -15,10 +15,13 @@
 package gcsx
 
 import (
+	b64 "encoding/base64"
 	"fmt"
 	"io"
 	"time"
 
+	"github.com/googlecloudplatform/gcsfuse/internal/art"
+	"github.com/googlecloudplatform/gcsfuse/internal/cache/file/downloader"
 	"github.com/googlecloudplatform/gcsfuse/internal/storage/gcs"
 	"golang.org/x/net/context"
 )
@@ -76,6 +79,64 @@ func NewSyncer(
 // fullObjectCreator
 ////////////////////////////////////////////////////////////////////////
 
+// TODO: clean up this state
+type encryptingReader struct {
+	r io.Reader
+	buf []byte //crypto chunk size from this buffer size
+	ofs int //init to 0
+	br int  //init to 0
+	metadataMap map[string]string
+	kek [32]byte
+}
+
+func (er encryptingReader) Read(b []byte) (n int, err error) {
+	chunkSize := len(er.buf)
+
+	for {
+		curChunk := er.ofs / chunkSize
+		chunkOfs := er.ofs % chunkSize
+
+		if n > len(b) {
+			panic("overran somehow, bad")
+		}
+		if n == len(b) {
+			if chunkOfs == er.br {
+				err = io.EOF
+			}
+			break
+		}
+
+		if chunkOfs == 0 {
+			er.br, err = er.r.Read(er.buf)
+			if err == io.EOF {
+				err = nil
+			}
+			if err != nil {
+				return
+			}
+
+			var hdr []byte
+			hdr, err = downloader.NestedSeal(&er.kek, er.buf[:er.br])
+
+			if err != nil {
+				return
+			}
+
+			er.metadataMap[fmt.Sprintf("h%d", curChunk)] = b64.URLEncoding.EncodeToString(hdr)
+		}
+
+		bc := copy(b, er.buf[:er.br])
+		n += bc
+		er.ofs += bc
+	}
+
+	// TODO/HACK: figure out a better way to write metadata from here; this would be genuinely awful
+	go func() {
+		time.Sleep(5)
+
+	}
+}
+
 type fullObjectCreator struct {
 	bucket gcs.Bucket
 }
@@ -87,6 +148,14 @@ func (oc *fullObjectCreator) Create(
 	mtime *time.Time,
 	r io.Reader) (o *gcs.Object, err error) {
 	metadataMap := make(map[string]string)
+	metadataMap["gcsfuse_crypt"] = "6"
+
+	var kek [32]byte
+	art.KekMutex.Lock()
+	copy(kek[:], art.Kek[:])
+	art.KekMutex.Unlock()
+	// TODO: just use a constructor lol
+	r = encryptingReader {r, make([]byte, downloader.CryptoChunkSize), 0, 0, make(map[string]string), kek}
 
 	var req *gcs.CreateObjectRequest
 	if srcObject == nil {
@@ -231,7 +300,8 @@ func (os *syncer) SyncObject(
 	// Otherwise, we need to create a new generation. If the source object is
 	// long enough, hasn't been dirtied, and has a low enough component count,
 	// then we can make the optimization of not rewriting its contents.
-	if srcSize >= os.appendThreshold &&
+	// TODO: can this still be done?
+	/*if srcSize >= os.appendThreshold &&
 		sr.DirtyThreshold == srcSize &&
 		srcObject.ComponentCount < gcs.MaxComponentCount {
 		_, err = content.Seek(srcSize, 0)
@@ -241,7 +311,7 @@ func (os *syncer) SyncObject(
 		}
 
 		o, err = os.appendCreator.Create(ctx, objectName, srcObject, sr.Mtime, content)
-	} else {
+	} else {*/
 		_, err = content.Seek(0, 0)
 		if err != nil {
 			err = fmt.Errorf("Seek: %w", err)
@@ -249,7 +319,7 @@ func (os *syncer) SyncObject(
 		}
 
 		o, err = os.fullCreator.Create(ctx, objectName, srcObject, sr.Mtime, content)
-	}
+	//}
 
 	// Deal with errors.
 	if err != nil {

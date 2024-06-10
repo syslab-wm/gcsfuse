@@ -579,6 +579,11 @@ func validateFlags(flags *flagStorage) (err error) {
 
 	if !flags.ClientProtocol.IsValid() {
 		err = fmt.Errorf("client protocol: %s is not valid", flags.ClientProtocol)
+		return
+	}
+
+	if len(flags.KekFile) == 0 {
+		err = fmt.Errorf("kek file not provided")
 	}
 
 	return
